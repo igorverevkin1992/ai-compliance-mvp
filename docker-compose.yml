@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # 1. Redis (Очередь задач)
+  redis:
+    image: redis:7-alpine
+    container_name: ailawyer_redis
+    ports:
+      - "6379:6379"
+
+  # 2. Backend (Сервер API)
+  backend:
+    build: ./backend
+    container_name: ailawyer_backend
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - media_data:/app/uploads
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - UPLOAD_DIR=/app/uploads
+      # Берет значение из файла .env
+      - DATABASE_URL=${DATABASE_URL}
+    depends_on:
+      - redis
+
+  # 3. Worker (Исполнитель задач)
+  worker:
+    build: ./backend
+    container_name: ailawyer_worker
+    command: celery -A celery_app worker --loglevel=info
+    volumes:
+      - ./backend:/app
+      - media_data:/app/uploads
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - UPLOAD_DIR=/app/uploads
+      - C_FORCE_ROOT=true
+      # Берет значение из файла .env
+      - DATABASE_URL=${DATABASE_URL}
+    depends_on:
+      - redis
+      - backend
+
+  # 4. Frontend (Интерфейс)
+  frontend:
+    build: ./frontend
+    container_name: ailawyer_frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+
+volumes:
+  media_data:

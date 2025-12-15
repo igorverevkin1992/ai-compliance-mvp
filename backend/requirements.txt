@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+python-multipart
+google-generativeai
+pandas
+requests
+beautifulsoup4
+apscheduler
+python-docx
+pypdf
+shazamio
+celery
+redis
+flower
+eventlet
+sqlalchemy
+psycopg2-binary
