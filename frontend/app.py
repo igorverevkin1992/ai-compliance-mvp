@@ -83,7 +83,7 @@ if uploaded_file and api_key:
                 headers = {"X-API-Key": api_key}
                 
                 # Старт задачи
-                res = requests.post(f"{BACKEND_URL}/analyze", files=files, data=data, headers=headers)
+                res = requests.post(f"{BACKEND_URL}/analyze", files=files, data=data, headers=headers, timeout=600)
                 
                 if res.status_code == 200:
                     task_id = res.json()['task_id']
