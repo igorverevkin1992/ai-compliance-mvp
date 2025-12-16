@@ -19,6 +19,7 @@ class VerificationRequest(BaseModel):
     record_id: int
     verified_json: List[Dict[str, Any]]
     rating: Optional[int] = 5
+    user_comment: Optional[str] = ""
 
 
 @app.post("/analyze")
@@ -68,6 +69,7 @@ async def verify_analysis(req: VerificationRequest):
         record.verified_result_json = req.verified_json
         record.is_verified = True
         record.rating = req.rating
+        record.user_comment = req.user_comment
 
         db.commit()
         db.close()
