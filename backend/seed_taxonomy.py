@@ -3,7 +3,7 @@ import os
 from sqlalchemy import create_engine, text
 
 # Вставь ссылку из .env
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres.ВАШ_ПРОЕКТ:ПАРОЛЬ@aws-0-eu-central-1.pooler.supabase.com:6543/postgres")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres.naxfhbmdvxxejgmpfqeh:IgorV199205161992@aws-1-eu-central-2.pooler.supabase.com:6543/postgres")
 
 engine = create_engine(DATABASE_URL)
 

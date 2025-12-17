@@ -4,9 +4,17 @@ import requests
 import time
 import os
 import json
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
 
 # --- КОНФИГУРАЦИЯ ---
-st.set_page_config(page_title="AI-Lawyer Enterprise", page_icon="⚖️", layout="wide")
+st.set_page_config(
+    page_title="AI-Lawyer Enterprise",
+    page_icon="⚖️",
+    layout="wide"
+)
+
+# Адрес бэкенда
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
 # --- СТИЛИ CSS ---
@@ -15,202 +23,367 @@ st.markdown("""
     .risk-high { color: #ff4b4b; font-weight: bold; }
     .risk-medium { color: #ffa726; font-weight: bold; }
     .risk-safe { color: #00c853; font-weight: bold; }
+    .stButton button { width: 100%; }
+    /* Делаем таблицу более компактной */
+    div[data-testid="stDataFrame"] { width: 100%; }
     </style>
 """, unsafe_allow_html=True)
 
 # --- ИНИЦИАЛИЗАЦИЯ ПАМЯТИ ---
-if 'analysis_result' not in st.session_state:
-    st.session_state.analysis_result = None
-if 'asset_id' not in st.session_state:
-    st.session_state.asset_id = None
+if 'analysis_result' not in st.session_state: st.session_state.analysis_result = None
+if 'asset_id' not in st.session_state: st.session_state.asset_id = None
+if 'available_models' not in st.session_state: st.session_state.available_models = []
+if 'valid_key' not in st.session_state: st.session_state.valid_key = False
+if 'filename' not in st.session_state: st.session_state.filename = None
 
-# --- ИНТЕРФЕЙС ---
-st.title("⚖️ AI-Lawyer Enterprise v6.0 (Compliance Dashboard)")
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
+def flatten_report_for_editor(report):
+    """Превращает сложный вложенный JSON в плоскую таблицу для редактора"""
+    flat_rows = []
+    
+    # Создаем словарь доказательств для быстрого поиска: id -> {start, end, quote}
+    evidence_map = {e['id']: e for e in report.get('evidence', [])}
+    
+    labels = report.get('labels', [])
+    if not labels:
+        return pd.DataFrame(columns=["start", "end", "severity", "code", "rationale", "quote"])
+
+    for lbl in labels:
+        # Ищем связанные доказательства (таймкоды)
+        evidence_ids = lbl.get('evidence_ids', [])
+        
+        # Если доказательств нет, создаем строку без времени
+        if not evidence_ids:
+            flat_rows.append({
+                "start": "00:00:00",
+                "end": "00:00:00",
+                "severity": lbl.get('severity', 0),
+                "code": lbl.get('code', 'UNKNOWN'),
+                "rationale": lbl.get('rationale', ''),
+                "quote": ""
+            })
+            continue
+
+        # Если есть доказательства, создаем строку для каждого куска
+        for eid in evidence_ids:
+            ev = evidence_map.get(eid, {})
+            # Форматируем время
+            s_ms = ev.get('start_ms', 0) or 0
+            e_ms = ev.get('end_ms', 0) or 0
+            
+            start_fmt = time.strftime('%H:%M:%S', time.gmtime(s_ms / 1000))
+            end_fmt = time.strftime('%H:%M:%S', time.gmtime(e_ms / 1000))
+            
+            flat_rows.append({
+                "start": start_fmt,
+                "end": end_fmt,
+                "severity": lbl.get('severity', 0),
+                "code": lbl.get('code', 'UNKNOWN'),
+                "rationale": lbl.get('rationale', ''),
+                "quote": ev.get('text_quote', '') or ev.get('notes', '')
+            })
+            
+    return pd.DataFrame(flat_rows)
+
+def generate_premiere_xml(df, filename):
+    """Генерация XML из DataFrame"""
+    root = ET.Element("xmeml", version="4")
+    sequence = ET.SubElement(root, "sequence")
+    ET.SubElement(sequence, "name").text = f"Analyzed_{filename}"
+    rate = ET.SubElement(sequence, "rate")
+    ET.SubElement(rate, "timebase").text = "25"
+
+    for _, row in df.iterrows():
+        # Игнорируем зеленые/безопасные строки при экспорте в монтажку
+        # (предполагаем, что severity 0 - это безопасно)
+        if row.get('severity') == 0: continue
+        
+        marker = ET.SubElement(sequence, "marker")
+        try:
+            # Парсим HH:MM:SS обратно в кадры
+            parts = str(row['start']).split(':')
+            h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+            total_seconds = h*3600 + m*60 + s
+            start_frame = total_seconds * 25
+        except:
+            start_frame = 0
+            
+        ET.SubElement(marker, "name").text = f"[{row.get('severity')}] {row.get('code')}"
+        ET.SubElement(marker, "comment").text = str(row.get('rationale'))
+        ET.SubElement(marker, "in").text = str(start_frame)
+        ET.SubElement(marker, "out").text = str(start_frame + 125) 
+
+    return minidom.parseString(ET.tostring(root)).toprettyxml(indent="   ")
+
+def color_rows(row):
+    """Раскраска таблицы"""
+    sev = row.get('severity', 0)
+    color = 'white'
+    if sev == 3: color = '#ffcccc' # RED
+    elif sev == 2: color = '#ffe5cc' # ORANGE
+    elif sev == 1: color = '#ffffcc' # YELLOW
+    elif sev == 0: color = '#ccffcc' # GREEN
+    return [f'background-color: {color}; color: black'] * len(row)
+
+# --- ИНТЕРФЕЙС (UI) ---
+
+st.title("⚖️ AI-Lawyer Enterprise v6.2 (Full Suite)")
+
+# --- БОКОВАЯ ПАНЕЛЬ ---
 with st.sidebar:
-    st.header("Настройки")
+    st.header("Профиль проверки")
+    profile = st.selectbox(
+        "Стандарт:", 
+        ["ntv", "youtube"],
+        format_func=lambda x: "📺 НТВ (ТВ-вещание)" if x == "ntv" else "▶️ YouTube / Блогеры"
+    )
     api_key = st.text_input("Gemini API Key", type="password")
-    st.info("Режим: Deep Compliance (NTV Policies)")
+    
+    if api_key:
+        if st.button("🔄 Проверить ключ и найти модели"):
+            with st.spinner("Проверка..."):
+                try:
+                    res = requests.post(f"{BACKEND_URL}/list-models", json={"api_key": api_key})
+                    if res.status_code == 200:
+                        models = res.json().get("models", [])
+                        st.session_state.available_models = models
+                        st.session_state.valid_key = True
+                        st.success(f"Доступно: {len(models)}")
+                    else:
+                        st.error("Ключ не подходит")
+                        st.session_state.valid_key = False
+                except Exception as e:
+                    st.error(f"Ошибка сети: {e}")
 
-# 1. ЗАГРУЗКА
-uploaded_file = st.file_uploader("Загрузить материал", type=['mp4', 'mov', 'mp3', 'wav', 'docx', 'pdf'])
+    # Выбор модели
+    model_opts = st.session_state.available_models
+    default_idx = 0
+    # Пытаемся найти 1.5 flash как дефолт
+    for i, m in enumerate(model_opts):
+        if "1.5-flash" in m: default_idx = i; break
+            
+    selected_model = "gemini-1.5-flash"
+    if st.session_state.valid_key and model_opts:
+        selected_model = st.selectbox("Модель:", model_opts, index=default_idx)
+    
+    st.markdown("---")
+    st.caption("🔴 Severity 3: CRITICAL")
+    st.caption("🟠 Severity 2: MEDIUM")
+    st.caption("🟡 Severity 1: LOW")
+    st.caption("🟢 Severity 0: SAFE")
 
-if uploaded_file and api_key:
-    if st.button("🚀 Запустить проверку", type="primary"):
-        with st.spinner("Анализ контента, проверка политик и поиск прецедентов..."):
-            try:
-                # Очистка
-                st.session_state.analysis_result = None
+# --- ЗАГРУЗКА ---
+st.subheader("1. Загрузка материала")
+uploaded_file = st.file_uploader("Файл", type=['mp4', 'mov', 'mp3', 'wav', 'ogg', 'docx', 'pdf'])
+
+if uploaded_file and st.session_state.valid_key:
+    if st.button("🚀 Запустить анализ", type="primary"):
+        # 1. Сбрасываем старые результаты
+        st.session_state.analysis_result = None
+        st.session_state.asset_id = None
+        st.session_state.last_profile = profile
+        
+        # 2. Создаем статус-бар (он не блокирует интерфейс как spinner)
+        status_container = st.status("🚀 Инициализация...", expanded=True)
+        
+        try:
+            # Подготовка данных
+            ext = uploaded_file.name.split('.')[-1]
+            safe_filename = f"input_file.{ext}"
+            files = {"file": (safe_filename, uploaded_file, uploaded_file.type)}
+            data = {"original_filename": uploaded_file.name, "model_name": selected_model, "profile":profile}
+            headers = {"X-API-Key": api_key}
+            
+            status_container.write("📤 Загрузка файла на сервер...")
+            
+            # Отправка (таймаут 10 минут)
+            res = requests.post(f"{BACKEND_URL}/analyze", files=files, data=data, headers=headers, timeout=600)
+            
+            if res.status_code == 200:
+                task_id = res.json()['task_id']
+                status_container.write(f"⚙️ Задача ID: {task_id}. Анализ начат...")
                 
-                # Подготовка
-                ext = uploaded_file.name.split('.')[-1]
-                safe_filename = f"input_file.{ext}"
-                files = {"file": (safe_filename, uploaded_file, uploaded_file.type)}
-                data = {"original_filename": uploaded_file.name}
-                headers = {"X-API-Key": api_key}
+                # Цикл опроса (Polling)
+                last_status_msg = ""  # <--- 1. Переменная для запоминания
                 
-                # Отправка
-                res = requests.post(f"{BACKEND_URL}/analyze", files=files, data=data, headers=headers, timeout=600)
-                
-                if res.status_code == 200:
-                    task_id = res.json()['task_id']
-                    status_text = st.empty()
-                    prog_bar = st.progress(0)
-                    
-                    while True:
-                        time.sleep(3)
-                        try:
-                            status_res = requests.get(f"{BACKEND_URL}/status/{task_id}")
-                            status_data = status_res.json()
-                            state = status_data.get("state")
+                while True:
+                    time.sleep(2)
+                    try:
+                        s_res = requests.get(f"{BACKEND_URL}/status/{task_id}")
+                        s_data = s_res.json()
+                        state = s_data.get("state")
+                        
+                        if state == 'SUCCESS':
+                            status_container.update(label="✅ Анализ завершен!", state="complete", expanded=False)
                             
-                            if state == 'SUCCESS':
-                                prog_bar.progress(100)
-                                st.session_state.analysis_result = status_data.get("result", {})
-                                st.session_state.asset_id = st.session_state.analysis_result.get('_asset_id')
-                                st.rerun()
-                                break
-                            elif state == 'FAILURE':
-                                st.error(f"Ошибка: {status_data.get('error')}")
-                                st.stop()
-                            elif state == 'PROGRESS':
-                                msg = status_data.get("status", "Обработка...")
-                                status_text.text(f"Статус: {msg}")
-                        except Exception as e:
-                            time.sleep(3)
-                else:
-                    st.error(f"Ошибка сервера: {res.text}")
-            except Exception as e:
-                st.error(f"Ошибка соединения: {e}")
+                            st.session_state.analysis_result = s_data.get("result", {})
+                            st.session_state.asset_id = st.session_state.analysis_result.get('_asset_id')
+                            st.session_state.filename = uploaded_file.name
+                            
+                            st.rerun()
+                            break
+                        
+                        elif state == 'FAILURE':
+                            status_container.update(label="❌ Ошибка", state="error")
+                            st.error(f"Ошибка задачи: {s_data.get('error')}")
+                            break
+                            
+                        elif state == 'PROGRESS':
+                            msg = s_data.get("status", "Обработка...")
+                            
+                            # <--- 2. ПРОВЕРКА: Пишем только если статус изменился
+                            if msg != last_status_msg:
+                                status_container.write(f"🔄 {msg}")
+                                last_status_msg = msg 
+                            # ----------------------------------------------------
+                            
+                    except Exception:
+                        pass
+            else:
+                status_container.update(label="❌ Ошибка сервера", state="error")
+                st.error(f"Код {res.status_code}: {res.text}")
+                
+        except Exception as e:
+            status_container.update(label="❌ Ошибка соединения", state="error")
+            st.error(str(e))
 
-# 2. ДАШБОРД РЕЗУЛЬТАТОВ
+elif uploaded_file and not st.session_state.valid_key:
+    st.warning("⚠️ Пожалуйста, введите API Key и нажмите 'Проверить ключ' в меню слева.")
+
+# --- ДАШБОРД ---
 if st.session_state.analysis_result:
     res = st.session_state.analysis_result
     
-    # Обработка ошибки, если AI вернул error внутри JSON
     if isinstance(res, dict) and "error" in res:
-        st.error(f"AI Error: {res['error']}")
+        st.error(f"AI вернул ошибку: {res['error']}")
     else:
-        # --- БЛОК 1: СВОДКА (HEADER) ---
+        st.divider()
+        st.subheader("2. Результаты анализа")
+        
+        # СВОДКА
         overall = res.get('overall', {})
         risk = overall.get('risk_level', 'UNKNOWN')
         
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Риск", risk)
-        with col2:
-            st.metric("Возрастной рейтинг", overall.get('age_rating', 'N/A'))
-        with col3:
-            conf = overall.get('confidence', 0)
-            if conf:
-                st.metric("Уверенность AI", f"{conf * 100:.1f}%")
-            else:
-                st.metric("Уверенность AI", "N/A")
-        with col4:
-            st.metric("Нарушений", len(res.get('labels', [])))
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Риск", risk)
+        c2.metric("Возраст", overall.get('age_rating', 'N/A'))
+        c3.metric("Доверие", f"{overall.get('confidence', 0)*100:.0f}%")
+        c4.metric("Найдено", len(res.get('labels', [])))
+        
+        st.info(f"📝 {overall.get('summary', 'Нет резюме')}")
+        
+        policy_tab_name = "📜 Политики YouTube" if st.session_state.get('last_profile') == 'youtube' else "📜 Политики НТВ"
 
-        st.info(f"📝 **Резюме:** {overall.get('summary', 'Нет описания')}")
-
-        # --- ТАБЫ С ДЕТАЛЯМИ ---
-        tab1, tab2, tab3, tab4 = st.tabs(["🚨 Нарушения", "📜 Политики НТВ", "✂️ Рекомендации", "🎓 Обучение"])
-
-        # ТАБ 1: Нарушения (Labels + Evidence)
-        with tab1:
-            labels = res.get('labels', [])
-            evidence = {e['id']: e for e in res.get('evidence', [])}
+        # Создаем табы с переменной
+        tab_list, tab_policy, tab_rec, tab_train = st.tabs([
+            "📋 Детальная Таблица", 
+            policy_tab_name,  # <--- Теперь здесь переменная
+            "✂️ Рекомендации", 
+            "🎓 Обучение (RAG)"
+        ])
+        
+        # 1. ТАБЛИЦА (РЕДАКТОР)
+        with tab_list:
+            st.write("Вы можете редактировать таблицу: менять Severity на 0 (Безопасно), править описание.")
             
-            if not labels:
-                st.success("Нарушений не обнаружено.")
-            else:
-                for lbl in labels:
-                    # Безопасное получение полей
-                    severity = lbl.get('severity', 0)
-                    code = lbl.get('code', 'UNKNOWN_CODE')
-                    confidence = lbl.get('confidence', 0)
-                    rationale = lbl.get('rationale', 'Нет объяснения')
-                    
-                    sev_icon = "🔴" if severity == 3 else "🟠" if severity == 2 else "🟡"
-                    
-                    with st.expander(f"{sev_icon} {code} (Уверенность: {confidence:.2f})"):
-                        st.write(f"**Причина:** {rationale}")
-                        st.markdown("**Доказательства:**")
-                        
-                        ev_ids = lbl.get('evidence_ids', [])
-                        if not ev_ids:
-                            st.write("_Нет привязанных доказательств_")
-                        
-                        for ref_id in ev_ids:
-                            ev_item = evidence.get(ref_id)
-                            if ev_item:
-                                # Конвертация времени
-                                start_s = ev_item.get('start_ms', 0) / 1000
-                                end_s = ev_item.get('end_ms', 0) / 1000
-                                start_fmt = time.strftime('%H:%M:%S', time.gmtime(start_s))
-                                end_fmt = time.strftime('%H:%M:%S', time.gmtime(end_s))
-                                
-                                qt = ev_item.get('text_quote', 'Нет текста')
-                                note = ev_item.get('notes', '')
-                                
-                                st.code(f"[{start_fmt} - {end_fmt}] {qt} ({note})")
-
-        # ТАБ 2: Политики (Policy Hits)
-        with tab2:
-            policies = res.get('policy_hits', [])
-            if not policies:
-                st.info("Специфические политики канала не нарушены.")
-            else:
-                for p in policies:
-                    req_code = p.get('req_code', 'UNKNOWN')
-                    why = p.get('why', '')
-                    prio = p.get('priority', 'P2')
-                    st.error(f"**Нарушено требование:** {req_code}")
-                    st.write(f"Причина: {why}")
-                    st.caption(f"Приоритет: {prio}")
-                    st.divider()
-
-        # ТАБ 3: Рекомендации (Actions)
-        with tab3:
-            recs = res.get('recommendations', [])
-            if not recs:
-                st.success("Действий не требуется.")
-            else:
-                rec_data = []
-                for r in recs:
-                    rec_data.append({
-                        "Действие": r.get('action'),
-                        "Приоритет": r.get('priority'),
-                        "Эффект": r.get('expected_effect'),
-                        "Таймкоды": r.get('target_evidence_ids')
-                    })
-                st.dataframe(pd.DataFrame(rec_data), use_container_width=True)
-
-        # ТАБ 4: Обучение (Feedback Loop)
-        with tab4:
-            st.write("### 🧑‍🏫 Панель учителя")
-            st.write("Если AI ошибся в **общем вердикте**, исправьте это здесь. Это попадет в RAG.")
+            # Превращаем сложный JSON в плоский DataFrame
+            flat_df = flatten_report_for_editor(res)
             
-            col_teach1, col_teach2 = st.columns(2)
-            with col_teach1:
-                # Безопасный индекс для selectbox
-                risk_options = ["SAFE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
-                try:
-                    current_index = risk_options.index(risk)
-                except ValueError:
-                    current_index = 0
-                    
-                new_risk = st.selectbox("Скорректировать уровень риска:", risk_options, index=current_index)
+            # Настройка колонок для редактора
+            col_config = {
+                "severity": st.column_config.NumberColumn("Степень (0-3)", min_value=0, max_value=3, help="0=Safe, 3=Critical"),
+                "code": st.column_config.TextColumn("Код нарушения"),
+                "rationale": st.column_config.TextColumn("Причина / Контекст", width="large"),
+                "start": st.column_config.TextColumn("Начало"),
+                "end": st.column_config.TextColumn("Конец"),
+                "quote": st.column_config.TextColumn("Цитата/Деталь")
+            }
             
-            teacher_note = st.text_area(
-                "Комментарий (Chain of Thought):",
-                placeholder="Пример: Это ложное срабатывание, так как сцена является исторической реконструкцией..."
+            edited_df = st.data_editor(
+                flat_df,
+                use_container_width=True,
+                num_rows="dynamic",
+                column_config=col_config,
+                key="editor_main"
             )
             
-            if st.button("Сохранить в Базу Знаний"):
-                if st.session_state.asset_id:
-                    st.info("Функция сохранения сложной структуры будет доступна в v6.1 (нужен апдейт Backend)")
-                else:
-                    st.error("Нет ID ассета.")
+            # Скачивание CSV
+            st.download_button(
+                "📥 Скачать таблицу (CSV)",
+                edited_df.to_csv(index=False).encode('utf-8'),
+                "report.csv",
+                "text/csv"
+            )
 
-# Футер
-st.markdown("---")
-st.caption("AI-Lawyer Enterprise v6.0 | Powered by Gemini 2.5 Flash & Supabase Vector")
+        # 2. ПОЛИТИКИ
+        with tab_policy:
+            policies = res.get('policy_hits', [])
+            if not policies: st.success("Нарушений политик НТВ не найдено.")
+            for p in policies:
+                st.error(f"**{p.get('req_code')}**: {p.get('why')}")
+                st.caption(f"Приоритет: {p.get('priority')}")
+                
+        # 3. РЕКОМЕНДАЦИИ И XML
+        with tab_rec:
+            recs = res.get('recommendations', [])
+            if recs:
+                r_df = pd.DataFrame(recs)
+                # Оставляем читаемые колонки
+                if not r_df.empty:
+                    st.dataframe(r_df[['action', 'priority', 'expected_effect']], use_container_width=True)
+            else:
+                st.info("Нет автоматических рекомендаций.")
+            
+            # Кнопка XML на основе ОТРЕДАКТИРОВАННОЙ таблицы
+            st.write("---")
+            current_file = st.session_state.filename or "video"
+            if "mp4" in current_file or "mov" in current_file or "wav" in current_file:
+                try:
+                    xml_data = generate_premiere_xml(edited_df, current_file)
+                    st.download_button("🎬 Скачать XML для Premiere Pro", xml_data, "markers.xml", "text/xml")
+                except Exception as e:
+                    st.warning(f"Не удалось создать XML: {e}")
+
+        # 4. ПАНЕЛЬ УЧИТЕЛЯ (ОБУЧЕНИЕ)
+        with tab_train:
+            st.header("🧑‍🏫 Обучение Агента")
+            st.write("Сохраните ваши правки в Базу Знаний. При следующем анализе Агент учтет этот опыт.")
+            
+            col_t1, col_t2 = st.columns(2)
+            with col_t1:
+                risk_opts = ["SAFE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+                # Пытаемся найти текущий индекс
+                try: d_idx = risk_opts.index(risk)
+                except: d_idx = 0
+                new_risk = st.selectbox("Итоговый вердикт:", risk_opts, index=d_idx)
+            
+            user_note = st.text_area(
+                "Комментарий учителя (Почему?):", 
+                placeholder="Например: Это комедийная сцена, крики являются частью игры..."
+            )
+            
+            if st.button("💾 Сохранить урок в Базу"):
+                if st.session_state.asset_id:
+                    # Собираем данные из РЕДАКТОРА
+                    verified_data = edited_df.to_dict(orient='records')
+                    
+                    payload = {
+                        "asset_id": str(st.session_state.asset_id),
+                        "final_risk": new_risk,
+                        "user_comment": user_note,
+                        "verified_json": verified_data, # Отправляем исправленную таблицу!
+                        "rating": 5
+                    }
+                    
+                    try:
+                        r = requests.put(f"{BACKEND_URL}/verify", json=payload)
+                        if r.status_code == 200:
+                            st.success("✅ Опыт сохранен! Агент стал умнее.")
+                            st.balloons()
+                        else:
+                            st.error(f"Ошибка сохранения: {r.text}")
+                    except Exception as e:
+                        st.error(f"Связь: {e}")
+                else:
+                    st.error("Нет ID ассета. Перезапустите анализ.")
