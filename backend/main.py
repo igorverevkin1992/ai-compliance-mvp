@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from sqlalchemy import text # Используем прямой SQL для надежности
 from database import SessionLocal
+from tasks import get_embedding
 
 app = FastAPI(title="AI-Lawyer Enterprise Backend")
 
@@ -73,30 +74,44 @@ async def get_task_status(task_id: str):
         response["error"] = str(task_result.result)
     return response
 
-# --- НОВЫЙ ЭНДПОИНТ СОХРАНЕНИЯ (UUID SUPPORT) ---
 @app.put("/verify")
-async def verify_analysis(req: VerificationRequest):
+async def verify_analysis(req: VerificationRequest, x_api_key: str = Header(..., alias="X-API-Key")):
     try:
         db = SessionLocal()
         
-        # Мы сохраняем это в таблицу human_review
-        # Используем Raw SQL, чтобы точно попасть в новую структуру v6.0
-        sql = text("""
-            INSERT INTO human_review (asset_id, final_risk, notes, status, created_at)
-            VALUES (:aid, :risk, :notes, 'DONE', now())
+        # 1. Создаем эмбеддинг для комментария учителя
+        # Мы "математизируем" логику: почему это SAFE или HIGH
+        vector = None
+        if req.user_comment:
+            from tasks import get_embedding # Импорт внутри чтобы избежать циклов
+            vector = get_embedding(req.user_comment, x_api_key)
+
+        # 2. Сохраняем в human_review (основной лог)
+        sql_review = text("""
+            INSERT INTO human_review (asset_id, final_risk, notes, status, verified_json)
+            VALUES (:aid, :risk, :notes, 'DONE', :v_json)
             RETURNING id
         """)
-        
-        result = db.execute(sql, {
-            "aid": req.asset_id,      # UUID ассета
-            "risk": req.final_risk,   # SAFE, HIGH...
-            "notes": req.user_comment # Комментарий учителя
-        })
+        review_res = db.execute(sql_review, {
+            "aid": req.asset_id, "risk": req.final_risk, 
+            "notes": req.user_comment, "v_json": json.dumps(req.verified_json)
+        }).fetchone()
+
+        # 3. Сохраняем в ВЕКТОРНУЮ ПАМЯТЬ (case_memory)
+        if vector:
+            sql_memory = text("""
+                INSERT INTO case_memory (review_id, memory_type, text, embedding, meta)
+                VALUES (:rid, 'HUMAN_CORRECTION', :txt, :vec, :meta)
+            """)
+            db.execute(sql_memory, {
+                "rid": review_res.id,
+                "txt": req.user_comment,
+                "vec": str(vector),
+                "meta": json.dumps({"final_risk": req.final_risk})
+            })
         
         db.commit()
         db.close()
-        return {"status": "success", "message": "Feedback saved to Knowledge Base"}
-    
+        return {"status": "success"}
     except Exception as e:
-        print(f"DB Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

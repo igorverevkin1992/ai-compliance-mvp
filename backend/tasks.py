@@ -21,6 +21,21 @@ SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
+def get_embedding(text_to_embed: str, api_key: str):
+    
+    try:
+        genai.configure(api_key=api_key)
+        # Используем специальную легкую модель для векторов
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=text_to_embed,
+            task_type="retrieval_document"
+        )
+        return result['embedding']
+    except Exception as e:
+        print(f"⚠️ Embedding Error: {e}")
+        return None
+
 def clean_json_text(text: str) -> str:
     text = re.sub(r"^```json\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"^```\s*", "", text, flags=re.MULTILINE)
@@ -108,58 +123,43 @@ def upload_to_gemini(path: str, mime_type: str):
         print(f"❌ Ошибка загрузки: {e}")
         return None
 
-def get_rag_context(db, profile="ntv"):
+def get_rag_context(db, profile, query_text, api_key):
+    """Ищет в базе 5 самых похожих исправленных кейсов через векторный поиск"""
     try:
-        # 1. Определяем фильтр (НТВ или YouTube)
-        if profile == "youtube":
-            pub_query = "YouTube%"
-        else:
-            pub_query = "НТВ%"
-
-        # 2. Политики
-        sql = text("""
+        # 1. Загружаем Политики (как и раньше)
+        pub_query = "YouTube%" if profile == "youtube" else "НТВ%"
+        sql_pol = text("""
             SELECT r.req_code, r.summary, r.full_text 
             FROM legal_requirement r
             JOIN legal_doc d ON r.doc_id = d.id
             WHERE d.publisher LIKE :pub
         """)
+        policies = db.execute(sql_pol, {"pub": pub_query}).fetchall()
+        policies_text = "\n".join([f"- [{p.req_code}] {p.summary}" for p in policies])
+
+        # 2. ВЕКТОРНЫЙ ПОИСК ПО ПАМЯТИ (Semantic RAG)
+        vector = get_embedding(query_text, api_key)
+        human_examples = "Похожих примеров не найдено."
         
-        policies = db.execute(sql, {"pub": pub_query}).fetchall()
-        
-        # Защита: если политик нет, ставим заглушку
-        if policies:
-            policies_text = "\n".join([f"- [{p.req_code}] {p.summary}: {p.full_text[:300]}..." for p in policies])
-        else:
-            policies_text = "Нет специфических политик для этого профиля. Используй общие законы РФ."
+        if vector:
+            # Ищем в таблице case_memory через оператор <=> (косинусное сходство)
+            sql_vector = text("""
+                SELECT text, meta->>'final_risk' as risk
+                FROM case_memory
+                ORDER BY embedding <=> :vec_str
+                LIMIT 5
+            """)
+            # Превращаем список чисел в строку, которую поймет Postgres
+            similar_cases = db.execute(sql_vector, {"vec_str": str(vector)}).fetchall()
+            
+            if similar_cases:
+                examples_list = [f"КЕЙС: {c.text} | ВЕРДИКТ: {c.risk}" for c in similar_cases]
+                human_examples = "\n\n".join(examples_list)
 
-        # 3. Таксономия (Коды ошибок)
-        taxonomy = db.execute(text("SELECT code, title FROM taxonomy_label")).fetchall()
-        if taxonomy:
-            taxonomy_text = "\n".join([f"- {t.code}: {t.title}" for t in taxonomy])
-        else:
-            taxonomy_text = "Коды нарушений не загружены в базу."
-
-        # 4. Примеры (RAG)
-        reviews = db.execute(text("""
-            SELECT notes FROM human_review 
-            WHERE verified_json IS NOT NULL 
-            ORDER BY created_at DESC LIMIT 5
-        """)).fetchall()
-        
-        human_examples = "Нет примеров."
-        if reviews:
-            # Фильтруем пустые заметки, чтобы не было ошибок
-            valid_notes = [f"СИТУАЦИЯ: {r.notes}" for r in reviews if r.notes]
-            if valid_notes:
-                human_examples = "\n\n".join(valid_notes)
-
-        # УСПЕХ: Возвращаем 3 значения
-        return policies_text, taxonomy_text, human_examples
-
+        return policies_text, human_examples
     except Exception as e:
-        print(f"⚠️ RAG Context Error: {e}")
-        # ОШИБКА: Возвращаем 3 пустые строки, чтобы программа НЕ УПАЛА
-        return "", "", ""
+        print(f"⚠️ RAG Error: {e}")
+        return "Ошибка политик", "Ошибка памяти"
 
 def save_results_to_db(db, asset_id, result_json, model_name):
     try:
@@ -218,6 +218,8 @@ def save_results_to_db(db, asset_id, result_json, model_name):
     except Exception as e:
         print(f"⚠️ DB Save Error: {e}")
         return None
+    
+    
 
 # --- MAIN TASK ---
 
@@ -313,6 +315,8 @@ def analyze_media_task(self, file_path: str, filename: str, api_key: str, model_
         db.close()
         
         result_data['_asset_id'] = str(asset_id)
+        result_data['_retrieved_context'] = human_examples 
+        
         return result_data
 
     except Exception as e:

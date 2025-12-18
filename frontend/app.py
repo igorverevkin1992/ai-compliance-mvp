@@ -272,6 +272,14 @@ if st.session_state.analysis_result:
         c4.metric("Найдено", len(res.get('labels', [])))
         
         st.info(f"📝 {overall.get('summary', 'Нет резюме')}")
+
+        retrieved_context = res.get('_retrieved_context', 'Нет данных')
+        with st.expander("🔍 AI Context: На чем основано решение (RAG)"):
+            st.write("**Найденные похожие случаи из вашей базы знаний:**")
+            if "Похожих примеров не найдено" in retrieved_context or not retrieved_context:
+                st.caption("База знаний пока пуста или нет подходящих случаев.")
+            else:
+                st.markdown(retrieved_context)
         
         policy_tab_name = "📜 Политики YouTube" if st.session_state.get('last_profile') == 'youtube' else "📜 Политики НТВ"
 
