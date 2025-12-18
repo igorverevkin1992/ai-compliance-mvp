@@ -62,9 +62,14 @@ def compress_media(input_path: str) -> tuple[str, str]:
         output_path = f"{output_filename}.mp4"
         command = [
             "ffmpeg", "-y", "-i", input_path,
-            "-vf", "scale=640:-2", 
-            "-c:v", "libx264", "-crf", "28", "-preset", "faster", "-r", "24",
-            "-c:a", "aac", "-ac", "1", "-ar", "16000", # Звук тоже сжимаем
+            "-vf", "scale=640:-2,format=yuv420p", # Принудительный формат пикселей yuv420p
+            "-c:v", "libx264", 
+            "-profile:v", "high", # Профиль совместимости
+            "-level", "4.1",
+            "-crf", "28", 
+            "-preset", "faster", 
+            "-r", "24",
+            "-c:a", "aac", "-ac", "1", "-ar", "16000",
             output_path
         ]
         mime = "video/mp4"
@@ -93,34 +98,29 @@ def compress_media(input_path: str) -> tuple[str, str]:
     return input_path, "application/octet-stream"
 
 def upload_to_gemini(path: str, mime_type: str):
-    """Загрузка с жестким ожиданием статуса ACTIVE"""
-    print(f"☁️ Загрузка: {path} (Mime: {mime_type})")
-    if not os.path.exists(path): return None
-    
+    """Загрузка с мгновенным отловом ошибок обработки"""
+    print(f"☁️ Uploading to Gemini: {path}")
     try:
         file = genai.upload_file(path, mime_type=mime_type)
-        print(f"   Загрузка завершена. Статус: {file.state.name}")
         
-        # ЦИКЛ ОЖИДАНИЯ ОБРАБОТКИ
-        # Мы должны постоянно опрашивать сервер: "Готово? Готово?"
+        # Ждем готовности
         start_time = time.time()
         while file.state.name == "PROCESSING":
-            print(f"⏳ Обработка ({int(time.time() - start_time)}s)", end="\r")
-            time.sleep(2)
-            # ВАЖНО: Обновляем объект файла с сервера
+            time.sleep(3)
             file = genai.get_file(file.name)
-            
-            # Таймаут 5 минут
+            # Если маленький файл обрабатывается дольше 40 секунд - это уже подозрительно
             if time.time() - start_time > 300:
-                raise Exception("Тайм аут обработки (5 мин).")
+                print("❌ Google застрял на обработке (возможно, несовместимый кодек).")
+                return None
 
-        if file.state.name != "ACTIVE":
-            raise Exception(f"Ошибка обработка. Статус: {file.state.name}")
+        if file.state.name == "FAILED":
+            print(f"❌ Google не смог обработать файл. Состояние: {file.state.name}")
+            return None
 
-        print(f"✅ Файл готов: {file.name}")
+        print(f"✅ Файл ACTIVE за {int(time.time() - start_time)} сек.")
         return file
     except Exception as e:
-        print(f"❌ Ошибка загрузки: {e}")
+        print(f"❌ Ошибка API Google при загрузке: {e}")
         return None
 
 def get_rag_context(db, profile, query_text, api_key):
@@ -266,13 +266,17 @@ def analyze_media_task(self, file_path: str, filename: str, api_key: str, model_
 
         # 4. RAG
         db = SessionLocal()
-        policies, taxonomy, examples = get_rag_context(db, profile)
         
-        prompt = SYSTEM_PROMPT_TEMPLATE.format(
-            policies_text=policies,
-            taxonomy_text=taxonomy,
-            human_examples=examples
-        )
+        policies_text, human_examples = get_rag_context(db, profile, f"{filename} {shazam_text}", api_key)
+        
+        # Мы берем таксономию напрямую из базы, так как она статична
+        taxonomy_res = db.execute(text("SELECT code, title FROM taxonomy_label")).fetchall()
+        taxonomy_text = "\n".join([f"- {t.code}: {t.title}" for t in taxonomy_res])
+
+        # Собираем финальный промпт через .replace (чтобы не сломать JSON-скобки)
+        prompt = SYSTEM_PROMPT_TEMPLATE.replace("{policies_text}", policies_text)
+        prompt = prompt.replace("{taxonomy_text}", taxonomy_text)
+        prompt = prompt.replace("{human_examples}", human_examples)
         
         visual_instruction = f"ПРОФИЛЬ ПРОВЕРКИ: {profile.upper()}. Анализируй контент строго по предоставленным политикам. ВАЖНО: Анализируй ВИДЕОРЯД. Обращай внимание на мимику, жесты и контекст происходящего (комедия, ссора, игра)."
 
@@ -316,7 +320,7 @@ def analyze_media_task(self, file_path: str, filename: str, api_key: str, model_
         
         result_data['_asset_id'] = str(asset_id)
         result_data['_retrieved_context'] = human_examples 
-        
+
         return result_data
 
     except Exception as e:

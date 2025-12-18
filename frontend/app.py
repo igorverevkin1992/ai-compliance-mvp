@@ -332,26 +332,37 @@ if st.session_state.analysis_result:
                 st.error(f"**{p.get('req_code')}**: {p.get('why')}")
                 st.caption(f"Приоритет: {p.get('priority')}")
                 
-        # 3. РЕКОМЕНДАЦИИ И XML
-        with tab_rec:
+        # 3. РЕКОМЕНДАЦИИ (РЕДАКТОР)
+        with tab_rec: # <--- УБЕДИСЬ, ЧТО ЭТО ИМЯ СОВПАДАЕТ С ТЕМ, ЧТО В ST.TABS
+            st.write("Отредактируйте технические задания для монтажера.")
+            
             recs = res.get('recommendations', [])
             if recs:
-                r_df = pd.DataFrame(recs)
-                # Оставляем читаемые колонки
-                if not r_df.empty:
-                    st.dataframe(r_df[['action', 'priority', 'expected_effect']], use_container_width=True)
+                recs_df = pd.DataFrame(recs)
+                needed_cols = ['action', 'priority', 'expected_effect']
+                # Оставляем только нужные колонки, если они есть
+                available_cols = [c for c in needed_cols if c in recs_df.columns]
+                recs_df = recs_df[available_cols]
             else:
-                st.info("Нет автоматических рекомендаций.")
+                recs_df = pd.DataFrame(columns=['action', 'priority', 'expected_effect'])
+
+            # Редактор для рекомендаций
+            edited_recs_df = st.data_editor(
+                recs_df,
+                use_container_width=True,
+                num_rows="dynamic",
+                key="editor_recs"
+            )
             
-            # Кнопка XML на основе ОТРЕДАКТИРОВАННОЙ таблицы
+            # Кнопка XML (на основе основной таблицы нарушений)
             st.write("---")
             current_file = st.session_state.filename or "video"
-            if "mp4" in current_file or "mov" in current_file or "wav" in current_file:
+            if any(ext in current_file.lower() for ext in ["mp4", "mov", "wav"]):
                 try:
                     xml_data = generate_premiere_xml(edited_df, current_file)
                     st.download_button("🎬 Скачать XML для Premiere Pro", xml_data, "markers.xml", "text/xml")
                 except Exception as e:
-                    st.warning(f"Не удалось создать XML: {e}")
+                    st.warning(f"XML недоступен: {e}")
 
         # 4. ПАНЕЛЬ УЧИТЕЛЯ (ОБУЧЕНИЕ)
         with tab_train:
@@ -373,25 +384,43 @@ if st.session_state.analysis_result:
             
             if st.button("💾 Сохранить урок в Базу"):
                 if st.session_state.asset_id:
-                    # Собираем данные из РЕДАКТОРА
-                    verified_data = edited_df.to_dict(orient='records')
+                    # Собираем данные ИЗ ОБОИХ редакторов
+                    verified_labels = edited_df.to_dict(orient='records')
+                    verified_recs = edited_recs_df.to_dict(orient='records') # <--- Берем правки из Tab 3
+                    
+                    # Формируем полный "Золотой отчет"
+                    full_verified_report = {
+                        "overall": {
+                            "risk_level": new_risk,
+                            "summary": res.get('overall', {}).get('summary', '') # сохраняем старое или можно добавить поле ввода
+                        },
+                        "labels": verified_labels,
+                        "recommendations": verified_recs,
+                        "evidence": res.get('evidence', []) # Доказательства обычно не меняем
+                    }
                     
                     payload = {
                         "asset_id": str(st.session_state.asset_id),
                         "final_risk": new_risk,
                         "user_comment": user_note,
-                        "verified_json": verified_data, # Отправляем исправленную таблицу!
+                        "verified_json": full_verified_report, # ОТПРАВЛЯЕМ ПОЛНУЮ СТРУКТУРУ
                         "rating": 5
                     }
                     
                     try:
-                        r = requests.put(f"{BACKEND_URL}/verify", json=payload)
+                        # ДОБАВЛЯЕМ ЗАГОЛОВОК С КЛЮЧОМ
+                        headers = {"X-API-Key": api_key}
+                        
+                        r = requests.put(
+                            f"{BACKEND_URL}/verify", 
+                            json=payload, 
+                            headers=headers # <--- ВАЖНО
+                        )
+                        
                         if r.status_code == 200:
                             st.success("✅ Опыт сохранен! Агент стал умнее.")
                             st.balloons()
                         else:
-                            st.error(f"Ошибка сохранения: {r.text}")
+                            st.error(f"Ошибка сервера: {r.text}")
                     except Exception as e:
-                        st.error(f"Связь: {e}")
-                else:
-                    st.error("Нет ID ассета. Перезапустите анализ.")
+                        st.error(f"Связь с сервером потеряна: {e}")

@@ -19,11 +19,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Обновленная модель для сохранения правки
 class VerificationRequest(BaseModel):
-    asset_id: str  # ТЕПЕРЬ ЭТО СТРОКА (UUID)
-    verified_json: List[Dict[str, Any]] = []
+    asset_id: str
+    verified_json: Dict[str, Any] = {} # ИСПРАВЛЕНО: теперь принимает словарь (весь отчет)
     rating: Optional[int] = 5
     user_comment: Optional[str] = None
-    final_risk: Optional[str] = "UNKNOWN" # Новый уровень риска от учителя
+    final_risk: Optional[str] = "UNKNOWN"
 
 class ApiKeyRequest(BaseModel):
     api_key: str
