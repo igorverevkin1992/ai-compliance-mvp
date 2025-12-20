@@ -1,8 +1,8 @@
-# backend/seed_policies.py
 import os
 from sqlalchemy import create_engine, text
+import uuid
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres.naxfhbmdvxxejgmpfqeh:IgorV199205161992@aws-1-eu-central-2.pooler.supabase.com:6543/postgres")
+DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 
 ntv_policies = [
@@ -43,30 +43,37 @@ ntv_policies = [
     }
 ]
 
-with engine.connect() as conn:
-    print("Seeding NTV Policies...")
-    
-    # 1. Создаем документ
-    doc_id = conn.execute(text("""
-        INSERT INTO legal_doc (publisher, title, version) 
-        VALUES ('НТВ', 'Требования к содержанию программ', 'ред. 23.01.2024')
-        RETURNING id
-    """)).scalar()
-    
-    # 2. Вставляем требования
-    for p in ntv_policies:
-        sql = text("""
-            INSERT INTO legal_requirement (doc_id, req_code, requirement_type, risk_floor, summary, full_text)
-            VALUES (:doc_id, :code, :type, :risk, :summ, :text)
-            ON CONFLICT (req_code) DO NOTHING;
-        """)
-        conn.execute(sql, {
-            "doc_id": doc_id,
-            "code": p["code"],
-            "type": p["type"],
-            "risk": p["risk"],
-            "summ": p["summary"],
-            "text": p["text"]
-        })
+def seed_ntv():
+    with engine.connect() as conn:
+        print("📺 Загрузка Политик НТВ...")
+        
+        # 1. Генерируем ID документа
+        doc_id = uuid.uuid4()
+        
+        conn.execute(text("""
+            INSERT INTO legal_doc (id, publisher, title, version) 
+            VALUES (:id, 'НТВ', 'Требования к содержанию программ', 'ред. 23.01.2024')
+        """), {"id": doc_id})
+        
+        # 2. Вставляем требования
+        for p in ntv_policies:
+            req_id = uuid.uuid4() # <--- Генерируем ID правила
+            
+            conn.execute(text("""
+                INSERT INTO legal_requirement (id, doc_id, req_code, requirement_type, risk_floor, summary, full_text)
+                VALUES (:id, :doc_id, :code, :type, :risk, :summ, :text)
+                ON CONFLICT (req_code) DO NOTHING;
+            """), {
+                "id": req_id, # <--- Передаем ID
+                "doc_id": doc_id,
+                "code": p["code"],
+                "type": p["type"],
+                "risk": p["risk"],
+                "summ": p["summary"],
+                "text": p["text"]
+            })
         conn.commit()
-    print("Done!")
+    print("✅ NTV policies added.")
+
+if __name__ == "__main__":
+    seed_ntv()

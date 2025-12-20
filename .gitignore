@@ -11,3 +11,28 @@ temp_*
 *.mov
 *.pdf
 *.docx
+# Секреты и настройки
+.env
+.env.local
+*.key
+*.pem
+
+# Папки Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Медиафайлы (чтобы не забивать репозиторий)
+*.mp4
+*.mov
+*.mp3
+*.wav
+*.m4a
+
+# Локальная база данных (если она в папке проекта)
+postgres_data/
+
+# IDE
+.vscode/
+.idea/

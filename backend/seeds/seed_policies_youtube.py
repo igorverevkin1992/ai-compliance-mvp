@@ -1,8 +1,9 @@
 import os
 from sqlalchemy import create_engine, text
+import uuid
 
-# Вставь свою ссылку Supabase
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres.naxfhbmdvxxejgmpfqeh:IgorV199205161992@aws-1-eu-central-2.pooler.supabase.com:6543/postgres")
+# Вставь свою ссылку Supabase (или из env)
+DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 
 yt_policies = [
@@ -43,30 +44,37 @@ yt_policies = [
     }
 ]
 
-with engine.connect() as conn:
-    print("Seeding YouTube Policies...")
-    
-    # 1. Создаем документ
-    doc_id = conn.execute(text("""
-        INSERT INTO legal_doc (publisher, title, version) 
-        VALUES ('YouTube/Internet', 'Правила Сообщества и Рекламодателей', '2025')
-        RETURNING id
-    """)).scalar()
-    
-    # 2. Вставляем требования
-    for p in yt_policies:
-        sql = text("""
-            INSERT INTO legal_requirement (doc_id, req_code, requirement_type, risk_floor, summary, full_text)
-            VALUES (:doc_id, :code, :type, :risk, :summ, :text)
-            ON CONFLICT (req_code) DO NOTHING;
-        """)
-        conn.execute(sql, {
-            "doc_id": doc_id,
-            "code": p["code"],
-            "type": p["type"],
-            "risk": p["risk"],
-            "summ": p["summary"],
-            "text": p["text"]
-        })
+def seed_youtube():
+    with engine.connect() as conn:
+        print("▶️ Загрузка Политик YouTube...")
+        
+        # 1. Генерируем ID для документа
+        doc_id = uuid.uuid4()
+        
+        conn.execute(text("""
+            INSERT INTO legal_doc (id, publisher, title, version) 
+            VALUES (:id, 'YouTube/Internet', 'Правила Сообщества и Рекламодателей', '2025')
+        """), {"id": doc_id})
+        
+        # 2. Вставляем требования
+        for p in yt_policies:
+            req_id = uuid.uuid4() # <--- Генерируем ID для каждого правила
+            
+            conn.execute(text("""
+                INSERT INTO legal_requirement (id, doc_id, req_code, requirement_type, risk_floor, summary, full_text)
+                VALUES (:id, :doc_id, :code, :type, :risk, :summ, :text)
+                ON CONFLICT (req_code) DO NOTHING;
+            """), {
+                "id": req_id, # <--- Передаем ID
+                "doc_id": doc_id,
+                "code": p["code"],
+                "type": p["type"],
+                "risk": p["risk"],
+                "summ": p["summary"],
+                "text": p["text"]
+            })
         conn.commit()
-    print("Done! YouTube policies added.")
+    print("✅ YouTube policies added.")
+
+if __name__ == "__main__":
+    seed_youtube()

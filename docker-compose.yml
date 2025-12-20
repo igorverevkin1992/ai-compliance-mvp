@@ -1,14 +1,28 @@
 version: '3.8'
 
 services:
-  # 1. Redis (Очередь задач)
+  # 1. Локальная База Данных (с поддержкой векторов)
+  db:
+    image: ankane/pgvector:v0.5.1
+    container_name: ailawyer_db
+    restart: always
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: ailawyer_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # 2. Redis
   redis:
     image: redis:7-alpine
     container_name: ailawyer_redis
     ports:
       - "6379:6379"
 
-  # 2. Backend (Сервер API)
+  # 3. Backend
   backend:
     build: ./backend
     container_name: ailawyer_backend
@@ -22,12 +36,15 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - UPLOAD_DIR=/app/uploads
-      # Берет значение из файла .env
-      - DATABASE_URL=${DATABASE_URL}
+      # Ссылка на локальную базу (имя хоста 'db')
+      - DATABASE_URL=postgresql+psycopg2://admin:adminpassword@db:5432/ailawyer_db
+    env_file:
+      - .env
     depends_on:
       - redis
+      - db
 
-  # 3. Worker (Исполнитель задач)
+  # 4. Worker
   worker:
     build: ./backend
     container_name: ailawyer_worker
@@ -40,13 +57,15 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - UPLOAD_DIR=/app/uploads
       - C_FORCE_ROOT=true
-      # Берет значение из файла .env
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=postgresql+psycopg2://admin:adminpassword@db:5432/ailawyer_db
+    env_file:
+      - .env
     depends_on:
       - redis
       - backend
+      - db
 
-  # 4. Frontend (Интерфейс)
+  # 5. Frontend
   frontend:
     build: ./frontend
     container_name: ailawyer_frontend
@@ -59,3 +78,4 @@ services:
 
 volumes:
   media_data:
+  postgres_data:
